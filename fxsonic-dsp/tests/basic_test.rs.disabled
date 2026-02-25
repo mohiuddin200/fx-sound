@@ -1,0 +1,19 @@
+// Basic tests for FxSonic DSP plugin
+
+#[test]
+fn test_descriptor_creation() {
+    use fxsonic_dsp::get_descriptor;
+
+    let descriptor = get_descriptor();
+    assert_eq!(descriptor.name(), "fxsonic_enhancer");
+    assert_eq!(descriptor.label(), "FxSonic Audio Enhancer");
+}
+
+#[test]
+fn test_port_count() {
+    use fxsonic_dsp::get_descriptor;
+
+    let descriptor = get_descriptor();
+    // Should have: 5 effect controls + 10 EQ bands + 1 enable + 4 audio ports = 20 ports
+    assert_eq!(descriptor.port_count(), 20);
+}

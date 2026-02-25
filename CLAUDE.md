@@ -1,0 +1,1 @@
+read the FxSonic-System-Requirements.md for understanding the project if need. 

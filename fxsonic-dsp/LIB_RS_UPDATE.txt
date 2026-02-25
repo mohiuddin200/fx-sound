@@ -1,0 +1,262 @@
+// FxSonic DSP - LADSPA Plugin
+// Core audio processing engine with 5 effects + 10-band EQ
+
+pub mod processor;
+pub mod limiter;
+pub mod eq;
+pub mod bass_boost;
+pub mod clarity;
+pub mod dynamic_boost;
+pub mod surround;
+pub mod ambiance;
+
+use ladspa::*;
+use processor::{AudioProcessor, AudioParams};
+use once_cell::sync::Lazy;
+
+// Port indices
+pub const PORT_BASS_BOOST: usize = 0;
+pub const PORT_CLARITY: usize = 1;
+pub const PORT_AMBIANCE: usize = 2;
+pub const PORT_SURROUND: usize = 3;
+pub const PORT_DYNAMIC_BOOST: usize = 4;
+pub const PORT_ENABLED: usize = 5;
+pub const PORT_EQ_1: usize = 6;
+pub const PORT_EQ_2: usize = 7;
+pub const PORT_EQ_3: usize = 8;
+pub const PORT_EQ_4: usize = 9;
+pub const PORT_EQ_5: usize = 10;
+pub const PORT_EQ_6: usize = 11;
+pub const PORT_EQ_7: usize = 12;
+pub const PORT_EQ_8: usize = 13;
+pub const PORT_EQ_9: usize = 14;
+pub const PORT_EQ_10: usize = 15;
+pub const PORT_AUDIO_IN_L: usize = 16;
+pub const PORT_AUDIO_IN_R: usize = 17;
+pub const PORT_AUDIO_OUT_L: usize = 18;
+pub const PORT_AUDIO_OUT_R: usize = 19;
+
+struct FxSonicInstance {
+    // Port pointers (provided by LADSPA host)
+    ports: [*mut f32; 20],
+
+    // Sample rate for processor
+    sample_rate: f32,
+
+    // Audio processor
+    processor: AudioProcessor,
+}
+
+impl Plugin for FxSonicInstance {
+    fn instantiate(_descriptor: &Descriptor, sample_rate: u32) -> Option<InstancePtr> {
+        let sr = sample_rate as f32;
+        let instance = Box::new(FxSonicInstance {
+            ports: [std::ptr::null_mut(); 20],
+            sample_rate: sr,
+            processor: AudioProcessor::new(sr),
+        });
+        Some(Box::into_raw(instance).cast())
+    }
+
+    fn cleanup(instance: InstancePtr) {
+        unsafe {
+            let _ = Box::from_raw(instance.cast::<FxSonicInstance>());
+        }
+    }
+
+    fn connect_port(instance: InstancePtr, port: usize, data_location: *mut f32) {
+        unsafe {
+            let inst = &mut *(instance.cast::<FxSonicInstance>());
+            inst.ports[port] = data_location;
+        }
+    }
+
+    fn activate(_instance: InstancePtr) {}
+
+    fn deactivate(_instance: InstancePtr) {}
+
+    fn run(instance: InstancePtr, sample_count: usize) {
+        unsafe {
+            let inst = &mut *(instance.cast::<FxSonicInstance>());
+
+            // Get control port values
+            // Effects: 0-1 normalized
+            // EQ: -1 to 1 normalized, maps to -12 to +12 dB
+            let bass_boost = *inst.ports[PORT_BASS_BOOST];
+            let clarity = *inst.ports[PORT_CLARITY];
+            let ambiance = *inst.ports[PORT_AMBIANCE];
+            let surround = *inst.ports[PORT_SURROUND];
+            let dynamic_boost = *inst.ports[PORT_DYNAMIC_BOOST];
+            let enabled = *inst.ports[PORT_ENABLED] > 0.5;
+
+            let eq_gains = [
+                *inst.ports[PORT_EQ_1] * 12.0,
+                *inst.ports[PORT_EQ_2] * 12.0,
+                *inst.ports[PORT_EQ_3] * 12.0,
+                *inst.ports[PORT_EQ_4] * 12.0,
+                *inst.ports[PORT_EQ_5] * 12.0,
+                *inst.ports[PORT_EQ_6] * 12.0,
+                *inst.ports[PORT_EQ_7] * 12.0,
+                *inst.ports[PORT_EQ_8] * 12.0,
+                *inst.ports[PORT_EQ_9] * 12.0,
+                *inst.ports[PORT_EQ_10] * 12.0,
+            ];
+
+            // Build params struct
+            let params = AudioParams {
+                enabled,
+                bass_boost,
+                clarity,
+                ambiance,
+                surround,
+                dynamic_boost,
+                eq_gains,
+            };
+
+            // Update processor
+            inst.processor.set_params(params);
+
+            // Get audio buffers
+            let input_l = std::slice::from_raw_parts_mut(inst.ports[PORT_AUDIO_IN_L], sample_count);
+            let input_r = std::slice::from_raw_parts_mut(inst.ports[PORT_AUDIO_IN_R], sample_count);
+            let output_l = std::slice::from_raw_parts_mut(inst.ports[PORT_AUDIO_OUT_L], sample_count);
+            let output_r = std::slice::from_raw_parts_mut(inst.ports[PORT_AUDIO_OUT_R], sample_count);
+
+            // Copy input to output (in-place processing)
+            output_l.copy_from_slice(input_l);
+            output_r.copy_from_slice(input_r);
+
+            // Process audio
+            inst.processor.process_stereo(output_l, output_r);
+        }
+    }
+}
+
+// Plugin descriptor
+static DESCRIPTOR: Lazy<Descriptor> = Lazy::new(|| {
+    let port_descriptions = vec![
+        // Control ports - Effects (normalized 0-1)
+        PortDescriptor {
+            name: c"Bass Boost".as_ptr(),
+            hint: PortHint::Control | PortHint::Default0 | PortHint::BoundedBelow0 | PortHint::BoundedAbove1,
+            ..Default::default()
+        },
+        PortDescriptor {
+            name: c"Clarity".as_ptr(),
+            hint: PortHint::Control | PortHint::Default0 | PortHint::BoundedBelow0 | PortHint::BoundedAbove1,
+            ..Default::default()
+        },
+        PortDescriptor {
+            name: c"Ambiance".as_ptr(),
+            hint: PortHint::Control | PortHint::Default0 | PortHint::BoundedBelow0 | PortHint::BoundedAbove1,
+            ..Default::default()
+        },
+        PortDescriptor {
+            name: c"Surround Sound".as_ptr(),
+            hint: PortHint::Control | PortHint::Default0 | PortHint::BoundedBelow0 | PortHint::BoundedAbove1,
+            ..Default::default()
+        },
+        PortDescriptor {
+            name: c"Dynamic Boost".as_ptr(),
+            hint: PortHint::Control | PortHint::Default0 | PortHint::BoundedBelow0 | PortHint::BoundedAbove1,
+            ..Default::default()
+        },
+        PortDescriptor {
+            name: c"Enabled".as_ptr(),
+            hint: PortHint::Control | PortHint::Toggle | PortHint::Default0,
+            ..Default::default()
+        },
+        // EQ bands (normalized -1 to +1, maps to -12 to +12 dB)
+        PortDescriptor {
+            name: c"EQ 31 Hz".as_ptr(),
+            hint: PortHint::Control | PortHint::Default0 | PortHint::BoundedBelow0 | PortHint::BoundedAbove1,
+            ..Default::default()
+        },
+        PortDescriptor {
+            name: c"EQ 62 Hz".as_ptr(),
+            hint: PortHint::Control | PortHint::Default0 | PortHint::BoundedBelow0 | PortHint::BoundedAbove1,
+            ..Default::default()
+        },
+        PortDescriptor {
+            name: c"EQ 125 Hz".as_ptr(),
+            hint: PortHint::Control | PortHint::Default0 | PortHint::BoundedBelow0 | PortHint::BoundedAbove1,
+            ..Default::default()
+        },
+        PortDescriptor {
+            name: c"EQ 250 Hz".as_ptr(),
+            hint: PortHint::Control | PortHint::Default0 | PortHint::BoundedBelow0 | PortHint::BoundedAbove1,
+            ..Default::default()
+        },
+        PortDescriptor {
+            name: c"EQ 500 Hz".as_ptr(),
+            hint: PortHint::Control | PortHint::Default0 | PortHint::BoundedBelow0 | PortHint::BoundedAbove1,
+            ..Default::default()
+        },
+        PortDescriptor {
+            name: c"EQ 1 kHz".as_ptr(),
+            hint: PortHint::Control | PortHint::Default0 | PortHint::BoundedBelow0 | PortHint::BoundedAbove1,
+            ..Default::default()
+        },
+        PortDescriptor {
+            name: c"EQ 2 kHz".as_ptr(),
+            hint: PortHint::Control | PortHint::Default0 | PortHint::BoundedBelow0 | PortHint::BoundedAbove1,
+            ..Default::default()
+        },
+        PortDescriptor {
+            name: c"EQ 4 kHz".as_ptr(),
+            hint: PortHint::Control | PortHint::Default0 | PortHint::BoundedBelow0 | PortHint::BoundedAbove1,
+            ..Default::default()
+        },
+        PortDescriptor {
+            name: c"EQ 8 kHz".as_ptr(),
+            hint: PortHint::Control | PortHint::Default0 | PortHint::BoundedBelow0 | PortHint::BoundedAbove1,
+            ..Default::default()
+        },
+        PortDescriptor {
+            name: c"EQ 16 kHz".as_ptr(),
+            hint: PortHint::Control | PortHint::Default0 | PortHint::BoundedBelow0 | PortHint::BoundedAbove1,
+            ..Default::default()
+        },
+        // Audio ports
+        PortDescriptor {
+            name: c"Input L".as_ptr(),
+            hint: PortHint::Audio | PortHint::Input,
+            ..Default::default()
+        },
+        PortDescriptor {
+            name: c"Input R".as_ptr(),
+            hint: PortHint::Audio | PortHint::Input,
+            ..Default::default()
+        },
+        PortDescriptor {
+            name: c"Output L".as_ptr(),
+            hint: PortHint::Audio | PortHint::Output,
+            ..Default::default()
+        },
+        PortDescriptor {
+            name: c"Output R".as_ptr(),
+            hint: PortHint::Audio | PortHint::Output,
+            ..Default::default()
+        },
+    ];
+
+    Descriptor {
+        unique_id: 424242,
+        label: c"fxsonic_enhancer".as_ptr(),
+        properties: PluginProperties::HARD_RT_CAPABLE,
+        name: c"FxSonic Audio Enhancer".as_ptr(),
+        maker: c"FxSonic Project".as_ptr(),
+        copyright: c"MIT".as_ptr(),
+        port_count: 20,
+        port_descriptions,
+    }
+});
+
+#[no_mangle]
+pub extern "C" fn ladspa_descriptor(index: u32) -> *const Descriptor {
+    if index == 0 {
+        &DESCRIPTOR as *const _
+    } else {
+        std::ptr::null()
+    }
+}

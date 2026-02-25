@@ -1,0 +1,41 @@
+{
+  "$schema": "https://schema.tauri.app/config/2.0.0",
+  "productName": "FxSonic",
+  "version": "0.1.0",
+  "identifier": "com.fxsonic.app",
+  "build": {
+    "beforeDevCommand": "cd frontend && yarn dev",
+    "beforeBuildCommand": "",
+    "devUrl": "http://localhost:1420",
+    "frontendDist": "frontend/dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "FxSonic",
+        "width": 900,
+        "height": 700,
+        "resizable": true,
+        "fullscreen": false,
+        "theme": "Dark"
+      }
+    ],
+    "security": {
+      "csp": null
+    },
+    "withGlobalTauri": true
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "category": "Audio",
+    "shortDescription": "Audio Enhancement for Linux",
+    "longDescription": "FxSonic is a Linux audio enhancement application inspired by FxSound, providing five main effect sliders with a simple, beautiful interface.",
+    "linux": {
+      "deb": {
+        "depends": ["pipewire", "libwebkit2gtk-4.1-0"]
+      }
+    }
+  },
+  "plugins": {}
+}
