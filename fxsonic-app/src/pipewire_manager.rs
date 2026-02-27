@@ -54,10 +54,26 @@ impl PipeWireManager {
         self.connected
     }
 
+    /// Check if the filter-chain process is still running.
+    /// Returns None if no process exists, Some(true) if running, Some(false) if exited.
+    pub fn is_filter_running(&mut self) -> Option<bool> {
+        if let Some(ref mut child) = self.filter_process {
+            match child.try_wait() {
+                Ok(Some(_)) => Some(false), // Process exited
+                Ok(None) => Some(true),     // Still running
+                Err(_) => Some(false),      // Error checking
+            }
+        } else {
+            None // No process started
+        }
+    }
+
     /// Start or restart the filter-chain process with current settings.
     /// The config file includes target.object for device routing, so the filter-chain
     /// will automatically route to the correct output device.
     pub fn apply_settings(&mut self, settings: &crate::config_manager::Settings) -> Result<(), String> {
+        eprintln!("FxSonic: Applying settings...");
+
         // Stop existing filter process
         self.stop_filter();
 
@@ -67,35 +83,51 @@ impl PipeWireManager {
         // Start new filter process
         self.start_filter()?;
 
+        // Give the process time to initialize
+        thread::sleep(Duration::from_millis(800));
+
         // Wait for the node to appear with retries, then set as default sink
         let mut found = false;
-        for attempt in 0..15 {
-            thread::sleep(Duration::from_millis(if attempt < 3 { 500 } else { 400 }));
-
+        for attempt in 0..20 {
             // Check if the filter process is still alive
             if let Some(ref mut child) = self.filter_process {
                 match child.try_wait() {
                     Ok(Some(status)) => {
-                        return Err(format!("Filter-chain process exited with: {}", status));
+                        return Err(format!("Filter-chain process exited unexpectedly with status: {}. Check ~/.config/fxsonic/filter-chain.log for details.", status));
                     }
                     Ok(None) => {} // Still running
-                    Err(_) => {}
+                    Err(e) => {
+                        eprintln!("Warning: Error checking process status: {}", e);
+                    }
                 }
             }
 
-            if self.set_fxsonic_as_default().is_ok() {
-                found = true;
-                break;
+            // Try to set FxSonic as default sink
+            match self.set_fxsonic_as_default() {
+                Ok(_) => {
+                    found = true;
+                    eprintln!("FxSonic: Successfully set as default sink");
+                    break;
+                }
+                Err(e) => {
+                    if attempt < 5 {
+                        eprintln!("FxSonic: Waiting for node to appear (attempt {}/20): {}", attempt + 1, e);
+                    }
+                }
             }
-            if attempt < 5 {
-                eprintln!("Waiting for FxSonic node to appear (attempt {}/15)...", attempt + 1);
-            }
+
+            // Exponential backoff for retries
+            let delay = if attempt < 3 { 300 } else if attempt < 10 { 500 } else { 800 };
+            thread::sleep(Duration::from_millis(delay));
         }
 
         if !found {
-            eprintln!("Warning: Could not set FxSonic as default sink. WirePlumber may set it automatically.");
+            eprintln!("FxSonic: Warning - Could not set as default sink after 20 attempts");
+            eprintln!("FxSonic: The filter-chain may still be running. Check status with: wpctl status");
+            return Err("Failed to set FxSonic as default sink after multiple attempts. The audio may not route through FxSonic.".to_string());
         }
 
+        eprintln!("FxSonic: Settings applied successfully");
         Ok(())
     }
 
@@ -106,12 +138,12 @@ impl PipeWireManager {
             let pid = child.id();
             let _ = child.kill();
             let _ = child.wait();
-            eprintln!("Killed filter-chain process (PID {})", pid);
+            eprintln!("FxSonic: Stopped filter-chain process (PID {})", pid);
         }
         self.filter_process = None;
 
         // Brief pause to let PipeWire clean up the old nodes
-        thread::sleep(Duration::from_millis(300));
+        thread::sleep(Duration::from_millis(400));
     }
 
     /// Start the filter-chain as a standalone PipeWire process.
@@ -120,17 +152,20 @@ impl PipeWireManager {
             .unwrap_or_else(|_| ".".to_string())
             + "/.config/fxsonic/filter-chain.log";
 
+        // Clear or create log file
         let log_file = std::fs::File::create(&log_path)
             .map_err(|e| format!("Failed to create log file: {}", e))?;
 
         let child = Command::new("pipewire")
             .args(["-c", &self.config_path])
-            .stdout(Stdio::null())
+            .stdout(Stdio::from(log_file.try_clone().unwrap()))
             .stderr(Stdio::from(log_file))
             .spawn()
-            .map_err(|e| format!("Failed to start filter-chain process: {}", e))?;
+            .map_err(|e| format!("Failed to start filter-chain process: {}. Is pipewire installed?", e))?;
 
-        eprintln!("Started filter-chain process (PID {})", child.id());
+        eprintln!("FxSonic: Started filter-chain process (PID {})", child.id());
+        eprintln!("FxSonic: Config file: {}", self.config_path);
+        eprintln!("FxSonic: Log file: {}", log_path);
         self.filter_process = Some(child);
         Ok(())
     }
@@ -160,7 +195,7 @@ impl PipeWireManager {
             }
         }
 
-        Err("FxSonic sink not found in wpctl status".to_string())
+        Err("FxSonic sink not found in wpctl status. The filter-chain process may not be running yet.".to_string())
     }
 
     /// Set FxSonic as the default audio sink so all apps route through it.
@@ -170,14 +205,14 @@ impl PipeWireManager {
         let output = Command::new("wpctl")
             .args(["set-default", &id.to_string()])
             .output()
-            .map_err(|e| format!("Failed to set default sink: {}", e))?;
+            .map_err(|e| format!("Failed to execute wpctl set-default: {}", e))?;
 
         if !output.status.success() {
             return Err(format!("wpctl set-default failed: {}",
                 String::from_utf8_lossy(&output.stderr)));
         }
 
-        eprintln!("Set FxSonic (id {}) as default sink", id);
+        eprintln!("FxSonic: Set as default sink (ID {})", id);
         Ok(())
     }
 
@@ -278,37 +313,17 @@ impl PipeWireManager {
     }
 
     /// Generate the standalone PipeWire config file for the filter-chain.
-    pub fn generate_filter_chain_config(&self, settings: &crate::config_manager::Settings) -> Result<String, String> {
-        // Build target.object line if a specific device is selected
-        let target_line = if settings.selected_device.is_empty() || settings.selected_device == "default" {
-            String::new()
-        } else {
-            format!("                target.object = \"{}\"\n", settings.selected_device)
-        };
+// FIXED: Use simpler module-style config that works
 
-        // Generate standalone PipeWire config with filter-chain
-        let config = format!(r#"# FxSonic PipeWire Filter-Chain Configuration
+pub fn generate_filter_chain_config(&self, settings: &crate::config_manager::Settings) -> Result<String, String> {
+    let config = format!(r#"# FxSonic PipeWire Filter-Chain Configuration
 # This file is automatically generated by FxSonic
 
-context.spa-libs = {{
-    audio.convert.* = audioconvert/libspa-audioconvert
-    support.*       = support/libspa-support
-}}
-
 context.modules = [
-    {{ name = libpipewire-module-rt
-        args = {{ nice.level = -11 }}
-    }}
-    {{ name = libpipewire-module-protocol-native }}
-    {{ name = libpipewire-module-client-node }}
-    {{ name = libpipewire-module-adapter }}
     {{   name = libpipewire-module-filter-chain
         args = {{
             node.description = "FxSonic Audio Enhancer"
             media.name       = "FxSonic"
-            audio.rate       = 48000
-            audio.channels   = 2
-            audio.position   = [ FL FR ]
             filter.graph = {{
                 nodes = [
                     {{
@@ -336,8 +351,6 @@ context.modules = [
                         }}
                     }}
                 ]
-                inputs  = [ "fxsonic:Input L" "fxsonic:Input R" ]
-                outputs = [ "fxsonic:Output L" "fxsonic:Output R" ]
             }}
             capture.props = {{
                 node.name      = "fxsonic_sink"
@@ -347,7 +360,7 @@ context.modules = [
             playback.props = {{
                 node.name      = "fxsonic_playback"
                 node.passive   = true
-{}                audio.position = [ FL FR ]
+                audio.position = [ FL FR ]
             }}
         }}
     }}
@@ -358,7 +371,7 @@ context.modules = [
             settings.ambiance.value,
             settings.surround.value,
             settings.dynamic_boost.value,
-            (settings.eq_bands[0].gain + 12.0) / 24.0, // Map -12..12 to 0..1
+            (settings.eq_bands[0].gain + 12.0) / 24.0,
             (settings.eq_bands[1].gain + 12.0) / 24.0,
             (settings.eq_bands[2].gain + 12.0) / 24.0,
             (settings.eq_bands[3].gain + 12.0) / 24.0,
@@ -368,14 +381,10 @@ context.modules = [
             (settings.eq_bands[7].gain + 12.0) / 24.0,
             (settings.eq_bands[8].gain + 12.0) / 24.0,
             (settings.eq_bands[9].gain + 12.0) / 24.0,
-            if settings.enabled { 1.0 } else { 0.0 },
-            target_line
+            if settings.enabled { 1.0 } else { 0.0 }
         );
-
         Ok(config)
     }
-
-    /// Write config to file.
     pub fn write_config(&self, settings: &crate::config_manager::Settings) -> Result<(), String> {
         let config_content = self.generate_filter_chain_config(settings)?;
 

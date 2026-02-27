@@ -84,11 +84,12 @@ function App() {
   const [devices, setDevices] = useState<AudioDevice[]>([]);
   const [selectedDevice, setSelectedDevice] = useState("default");
   const [isApplying, setIsApplying] = useState(false);
+  const [filterRunning, setFilterRunning] = useState(true);
 
   // Debounce timer for applying filter-chain changes
   const applyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // Schedule apply_changes with debounce
+  // Schedule apply_changes with debounce (longer to reduce restarts)
   const scheduleApply = useCallback(() => {
     if (applyTimerRef.current) {
       clearTimeout(applyTimerRef.current);
@@ -99,11 +100,13 @@ function App() {
         await invoke("apply_changes");
       } catch (error) {
         console.error("Failed to apply changes:", error);
+        // Show error to user
+        alert("Failed to apply audio changes. Please try again.");
       } finally {
         setIsApplying(false);
         applyTimerRef.current = null;
       }
-    }, 600);
+    }, 1500); // Increased from 600ms to 1500ms to reduce restart frequency
   }, []);
 
   const loadSettings = useCallback(async () => {
@@ -158,11 +161,25 @@ function App() {
     }
   }, []);
 
+  const checkFilterStatus = useCallback(async () => {
+    try {
+      const running = await invoke<boolean>("get_filter_status");
+      setFilterRunning(running);
+    } catch (error) {
+      console.error("Failed to check filter status:", error);
+    }
+  }, []);
+
   useEffect(() => {
     loadSettings();
     loadDevices();
     checkPipewireConnection();
-  }, [loadSettings, loadDevices, checkPipewireConnection]);
+    checkFilterStatus();
+
+    // Periodically check filter status
+    const interval = setInterval(checkFilterStatus, 5000);
+    return () => clearInterval(interval);
+  }, [loadSettings, loadDevices, checkPipewireConnection, checkFilterStatus]);
 
   // Cleanup debounce timer on unmount
   useEffect(() => {
@@ -189,25 +206,33 @@ function App() {
     setEffects(newEffects);
 
     try {
-      // Save the setting (does NOT restart filter-chain)
+      // Save the setting (does NOT restart filter-chain immediately)
       await invoke("set_effect", {
         effectName: newEffects[index].name,
         value: value / 100,
       });
-      // Schedule debounced apply
+      // Schedule debounced apply (will restart filter-chain after user stops sliding)
       scheduleApply();
     } catch (error) {
       console.error("Failed to set effect:", error);
+      // Revert UI change on error
+      setEffects(effects);
     }
   };
 
   const handlePresetChange = async (preset: string) => {
     setSelectedPreset(preset);
+    setIsApplying(true);
     try {
       await invoke("load_preset", { presetName: preset });
       await loadSettings();
     } catch (error) {
       console.error("Failed to load preset:", error);
+      alert("Failed to load preset. Please try again.");
+      // Revert UI change on error
+      setSelectedPreset(selectedPreset);
+    } finally {
+      setIsApplying(false);
     }
   };
 
@@ -229,10 +254,17 @@ function App() {
 
   const handleDeviceChange = async (deviceName: string) => {
     setSelectedDevice(deviceName);
+    setIsApplying(true);
     try {
+      // Device change requires immediate restart (no debounce)
       await invoke("set_device", { deviceName });
     } catch (error) {
       console.error("Failed to set output device:", error);
+      alert("Failed to change output device. Please try again.");
+      // Revert UI change on error
+      setSelectedDevice(selectedDevice);
+    } finally {
+      setIsApplying(false);
     }
   };
 
@@ -297,6 +329,14 @@ function App() {
               }`} />
               {pipewireConnected ? "PipeWire" : "Disconnected"}
             </div>
+
+            {/* Filter Status */}
+            {!filterRunning && (
+              <div className="flex items-center gap-2 px-3 py-1.5 rounded-full text-xs font-medium bg-amber-500/10 text-amber-400 ring-1 ring-amber-500/20 animate-pulse">
+                <div className="w-1.5 h-1.5 rounded-full bg-amber-400" />
+                Filter Stopped
+              </div>
+            )}
 
             {/* Power Toggle */}
             <button
@@ -508,6 +548,12 @@ function App() {
                   <span className="text-sm text-fx-text-dim">Engine</span>
                   <span className={`text-sm font-medium ${powerEnabled ? "text-emerald-400" : "text-fx-text-dim"}`}>
                     {powerEnabled ? "Active" : "Bypassed"}
+                  </span>
+                </div>
+                <div className="flex items-center justify-between">
+                  <span className="text-sm text-fx-text-dim">Filter Process</span>
+                  <span className={`text-sm font-medium ${filterRunning ? "text-emerald-400" : "text-red-400"}`}>
+                    {filterRunning ? "Running" : "Stopped"}
                   </span>
                 </div>
                 <div className="flex items-center justify-between">

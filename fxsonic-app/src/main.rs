@@ -21,6 +21,16 @@ fn get_pipewire_state(state: State<AppState>) -> Result<bool, String> {
     Ok(manager.is_connected())
 }
 
+// Check if filter-chain process is running
+#[tauri::command]
+fn get_filter_status(state: State<AppState>) -> Result<bool, String> {
+    let mut manager = state.pipewire_manager.lock().unwrap();
+    match manager.is_filter_running() {
+        Some(running) => Ok(running),
+        None => Ok(false), // No process started
+    }
+}
+
 // Toggle power - restarts filter-chain with new enabled state
 #[tauri::command]
 fn toggle_power(state: State<AppState>) -> Result<bool, String> {
@@ -211,6 +221,7 @@ fn main() {
         .manage(app_state)
         .invoke_handler(tauri::generate_handler![
             get_pipewire_state,
+            get_filter_status,
             toggle_power,
             set_effect,
             set_eq_band,
